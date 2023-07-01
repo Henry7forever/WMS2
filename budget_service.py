@@ -1,7 +1,5 @@
 import collections
 
-from sqlalchemy import and_
-
 from app import db
 from app.model.budget_model import Budget
 from app.model.budget_content_model import BudgetContent
@@ -10,7 +8,7 @@ from app.model.main_task_model import MainTask
 from app.model.partnumber_model import Partnumber
 from app.service import public_menu_service
 from app.service.main_task_service import get_eq_task_partnumber_demand_list_by_main_task_id
-from app.util.Api_exceptions import UnprocessableContentError, NotFoundError
+from app.util.api_exceptions import UnprocessableContentError, NotFoundError, ForbiddenError
 from app.util.enums import enum_budget_type, enum_task_type
 
 
@@ -42,14 +40,14 @@ def __get_fresh_partnumber_demand_list_by_eq_main_task_id(eq_main_task_id):
 
     partnumber_demand_list = get_eq_task_partnumber_demand_list_by_main_task_id(eq_main_task.id)
     for pn_demand in partnumber_demand_list:
-        partnumber_defective_qty = ((pn_demand.get("partnumber")).aggregate_by_product_non_defective_qty).get(
+        partnumber_non_defective_qty = pn_demand.get("partnumber").get_non_defective_qty_by_product_name(
             eq_main_task._phase._product.fx_code)
         partnumber_total_demand_qty = sum(
             [_function_demand['demand_qty'] for _function_demand in pn_demand.get("function_demand_list")])
-        total_purchase_qty = partnumber_total_demand_qty - partnumber_defective_qty
+        total_purchase_qty = partnumber_total_demand_qty - partnumber_non_defective_qty
         if total_purchase_qty > 0:
             migrate_partnumber_demand_list.append(
-                dict(pn_demand, total_purchase_qty=total_purchase_qty, on_hand_qty=partnumber_defective_qty)
+                dict(pn_demand, total_purchase_qty=total_purchase_qty, on_hand_qty=partnumber_non_defective_qty)
             )
 
     return migrate_partnumber_demand_list
@@ -114,7 +112,7 @@ def synchronize_pilot_budget_demand_with_stock(pilot_budget_id):
             fresh_function_list = [(i.get("function")) for i in fresh_function_demand_list]
             delete_function_list = []
             for old_budget_demand in old_budget_content._budget_demand_list:
-                if old_budget_demand.fucntion not in fresh_function_list:
+                if old_budget_demand.function not in fresh_function_list:
                     delete_function_list.append(old_budget_demand.function)
             for delete_function in delete_function_list:
                 BudgetDemand.delete_models_by_params(
@@ -139,14 +137,14 @@ def __insert_or_update_all_budget_content_by_pilot_budget_id(pilot_budget_id):
     for fresh_partnumber_demand in fresh_partnumber_demand_list:
         _pn = fresh_partnumber_demand.get("partnumber")
 
-        # TODO: 購買須滿足最小架站要求
-        update_budget_content_ignore_properties = ["partnumber_id", "budget_id", "total_purchase_qty", "unit_price", "unit_price_currency",
-         "exchange_rate_to_usd"]
-        existed_budget_content = BudgetContent.get_model_by_params({"partnumber_id": _pn.id, "budget_id": pilot_budget.id})
-        if existed_budget_content is not None and fresh_partnumber_demand.get("total_purchase_qty") > existed_budget_content.total_purchase_qty:
-            update_budget_content_ignore_properties.remove("total_purchase_qty")
+        # 購買須滿足最小架站要求
+        # update_budget_content_ignore_properties = ["partnumber_id", "budget_id", "total_purchase_qty", "unit_price", "unit_price_currency",
+        #  "exchange_rate_to_usd"]
+        # existed_budget_content = BudgetContent.get_model_by_params({"partnumber_id": _pn.id, "budget_id": pilot_budget.id})
+        # if existed_budget_content is not None and fresh_partnumber_demand.get("total_purchase_qty") > existed_budget_content.total_purchase_qty:
+        #     update_budget_content_ignore_properties.remove("total_purchase_qty")
 
-        _budget_content = BudgetContent.insert_or_update({
+        BudgetContent.insert_or_update({
             "partnumber_id": _pn.id,
             "budget_id": pilot_budget.id,
             "total_purchase_qty": fresh_partnumber_demand.get("total_purchase_qty"),
@@ -154,15 +152,17 @@ def __insert_or_update_all_budget_content_by_pilot_budget_id(pilot_budget_id):
             "unit_price": _pn.price,
             "unit_price_currency": _pn.currency,
             "exchange_rate_to_usd": public_menu_service.get_exchange_rate_to_usd(_pn.currency)
-        }, ignore_update=update_budget_content_ignore_properties)
-        db.session.flush()
+        }, ignore_update=["partnumber_id", "budget_id", "total_purchase_qty", "unit_price", "unit_price_currency",
+         "exchange_rate_to_usd"])
+
+        _budget_content = BudgetContent.get_model_by_params(params={"partnumber_id": _pn.id, "budget_id": pilot_budget.id})
+
         for _function_demand in fresh_partnumber_demand.get("function_demand_list"):
             BudgetDemand.insert_or_update({
                 "function": _function_demand.get("function"),
                 "demand_qty": _function_demand.get("demand_qty"),
                 "budget_content_id": _budget_content.id,
             }, ignore_update=["budget_content_id", "function"])
-            db.session.flush()
 
     return pilot_budget
 
@@ -180,32 +180,34 @@ def synchronize_budget_unit_price_and_currency_and_exchange_rate_with_partnumber
     return target_budget
 
 
-def get_budget_file_by_type_and_id(budget_id, types=enum_budget_type.get_value_list()):
+def get_budget_file_by_type_and_id(budget_id, types=enum_budget_type.get_name_list()):
     # TODO: implement file generate
 
     return
 
 
 def get_budget_content_by_params(params):
-    budget_content_list_query = BudgetContent.query.join(Partnumber.payment_method).filter(
+    budget_content_list_query = BudgetContent.query.join(Partnumber).filter(
              BudgetContent.budget_id == params.get("budget_id"))
-    if params.get("purchase_method") is not None and len(params.get("purchase_method") > 0):
+    if params.get("purchase_method") is not None and len(params.get("purchase_method")) > 0:
         budget_content_list_query = budget_content_list_query.filter(Partnumber.payment_method.in_(params.get("purchase_method")))
-    return budget_content_list_query.all()
+    rst = budget_content_list_query.all()
+    return rst
 
 
 # manually add budget content
 def add_budget_content(params):
-
-    __validate_budget_content_manually_modified_forbidden(params.get("budget_id"))
+    target_budget = Budget.get_model_by_id(params.get("budget_id"))
+    if target_budget.budget_type == enum_budget_type.PILOT:
+        raise ForbiddenError(msg=f'pilot budget can not manually add budget content')
 
     # TODO: prepare insert params: ["on_hand_qty", "unit_price", "unit_price_currency", "exchange_rate_to_usd"]
     _pn = Partnumber.get_model_by_id(params.get("partnumber_id"))
-    params.upadte({
-        "on_hand_qty": ,
+    params.update({
+        "on_hand_qty": _pn.get_non_defective_qty_by_product_name(target_budget._phase._product.fx_code),
         "unit_price": _pn.price,
         "unit_price_currency": _pn.currency,
-        "exchange_rate_to_usd": ,
+        "exchange_rate_to_usd": public_menu_service.get_exchange_rate_to_usd(_pn.currency),
     })
 
     new_budget_content = BudgetContent.add_model_by_params(params)
@@ -214,7 +216,7 @@ def add_budget_content(params):
 
 
 def update_budget_content(params):
-    _budget_content = Budget.get_model_by_id(params.get("id")).update_model_by_params(params)
+    _budget_content = BudgetContent.get_model_by_id(params.get("id")).update_model_by_params(params)
     db.session.commit()
     return _budget_content
 
@@ -229,7 +231,6 @@ def delete_budget_demand(budget_demand_id):
     target_budget_content = target_budget_demand._budget_content
     __validate_budget_demand_manually_modified_forbidden(target_budget_content.id)
     BudgetDemand.delete_model_by_id(budget_demand_id)
-    db.session.flush()
 
     if len(target_budget_content._budget_demand_list) <= 0:
         BudgetContent.delete_model_by_id(target_budget_content.id)
@@ -239,19 +240,17 @@ def delete_budget_demand(budget_demand_id):
 
 def insert_or_update_budget_demand(params):
     __validate_budget_demand_manually_modified_forbidden(params.get("budget_content_id"))
-    _budget_content = BudgetDemand.insert_or_update(params, ignore_update=["budget_content_id", "function"])
+    _budget_demand = BudgetDemand.insert_or_update(params, ignore_update=["budget_content_id", "function"])
     db.session.commit()
-    return _budget_content
+    return _budget_demand
 
 
 
 def __validate_budget_demand_manually_modified_forbidden(budget_content_id):
     if BudgetContent.get_model_by_id(budget_content_id)._budget.budget_type == enum_budget_type.PILOT:
-        raise UnprocessableContentError(msg=f'pilot budget can not manually modify budget content')
+        raise ForbiddenError(msg=f'pilot budget can not manually modify budget content')
 
 
-def __validate_budget_content_manually_modified_forbidden(budget_id):
-    if Budget.get_model_by_id(budget_id).budget_type == enum_budget_type.PILOT:
-        raise UnprocessableContentError(msg=f'pilot budget can not manually add budget content')
+
 
 
