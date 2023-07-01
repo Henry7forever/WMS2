@@ -6,7 +6,9 @@ from sqlalchemy.orm import validates
 from app import db
 from app.model import createAndUpdateMixin, base_model
 from app.model.budget_content_model import BudgetContent
-from app.util.Api_exceptions import UnprocessableContentError
+from app.util.api_exceptions import ForbiddenError
+from app.util.current_user import current_user
+from app.util.enums import enum_role
 
 
 class BudgetDemand(db.Model, createAndUpdateMixin, base_model):
@@ -35,12 +37,16 @@ class BudgetDemand(db.Model, createAndUpdateMixin, base_model):
 
     # TODO: cross function modify forbidden
     def _forbidden_cross_function_modify(self):
-        return
+        if enum_role.LL in [_role.role_name for _role in current_user._roles]:
+            return
+        if self.function not in current_user._functions:
+            raise ForbiddenError(msg=f'budget demand can not be modified while function of user not match demand function')
+
 
     def _budget_demand_lock(self):
         _budget_content = BudgetContent.get_model_by_id(self.budget_content_id)
         if _budget_content._budget.is_lock:
-            raise UnprocessableContentError(msg=f'budget demand can not be modified while locked status')
+            raise ForbiddenError(msg=f'budget demand can not be modified while locked status')
 
 
 @event.listens_for(BudgetDemand, 'before_update')
